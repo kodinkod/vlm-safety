@@ -1,0 +1,10 @@
+clip_model: ViT-L-14-336
+clip_pretrained: openai
+trigger_type: visual
+target_image: images/meth_pill.png
+init_image: images/white.jpeg
+image_size: 336
+epochs: 5000
+lr: 0.1
+output_dir: outputs/
+device: auto
