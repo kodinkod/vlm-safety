@@ -15,11 +15,22 @@ def render_text_image(
     font_size: int = 14,
     padding: int = 12,
     bg_color: str = "white",
+    bg_image: str | Path | Image.Image | None = None,
     text_color: str = "black",
     font_path: str | None = None,
 ) -> Image.Image:
-    """Render text onto an image, wrapping lines to fit."""
-    img = Image.new("RGB", (size, size), bg_color)
+    """Render text onto an image, wrapping lines to fit.
+
+    Args:
+        bg_image: Background image (path or PIL Image). Resized to fit.
+                  Overrides bg_color when set.
+    """
+    if bg_image is not None:
+        if isinstance(bg_image, (str, Path)):
+            bg_image = Image.open(bg_image).convert("RGB")
+        img = bg_image.resize((size, size), Image.LANCZOS)
+    else:
+        img = Image.new("RGB", (size, size), bg_color)
     draw = ImageDraw.Draw(img)
 
     if font_path:
@@ -76,6 +87,7 @@ def main() -> None:
     parser.add_argument("--font-size", type=int, default=14, help="Font size (default: 14)")
     parser.add_argument("--font", type=str, default=None, help="Path to .ttf font file")
     parser.add_argument("--bg", type=str, default="white", help="Background color")
+    parser.add_argument("--bg-image", type=str, default=None, help="Background image path (overrides --bg)")
     parser.add_argument("--fg", type=str, default="black", help="Text color")
     args = parser.parse_args()
 
@@ -97,6 +109,7 @@ def main() -> None:
         font_size=args.font_size,
         font_path=args.font,
         bg_color=args.bg,
+        bg_image=args.bg_image,
         text_color=args.fg,
     )
 
