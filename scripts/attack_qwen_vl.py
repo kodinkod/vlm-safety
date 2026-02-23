@@ -11,6 +11,7 @@ tensor ops so gradients flow back to the optimized image.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -179,6 +180,26 @@ def encode_tensor(x: torch.Tensor, vision_encoder) -> torch.Tensor:
     return feats
 
 
+def save_checkpoint(path: str | Path, x_adv: torch.Tensor, optimizer, step: int, losses: list[float]):
+    """Save optimization checkpoint."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "x_adv": x_adv.detach().cpu(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "step": step,
+        "losses": losses,
+    }, path)
+    logger.info(f"Checkpoint saved: {path} (step {step})")
+
+
+def load_checkpoint(path: str | Path, device: str = "cuda") -> dict:
+    """Load optimization checkpoint."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    logger.info(f"Checkpoint loaded: {path} (step {ckpt['step']}, loss={ckpt['losses'][-1]:.6f})")
+    return ckpt
+
+
 def optimize(
     target_feats: torch.Tensor,
     vision_encoder,
@@ -188,25 +209,48 @@ def optimize(
     image_w: int = 448,
     device: str = "cuda",
     init_image: str | None = None,
+    checkpoint_dir: str | Path | None = None,
+    checkpoint_every: int = 100,
+    resume_from: str | Path | None = None,
 ) -> tuple[torch.Tensor, list[float]]:
     """Optimize adversarial image to match target features."""
-    # Initialize in logit space (sigmoid maps to [0,1])
-    if init_image and init_image != "noise":
-        img = Image.open(init_image).convert("RGB").resize((image_w, image_h))
-        x = torch.tensor(np.array(img) / 255.0, dtype=torch.float32)
-        x = x.permute(2, 0, 1).unsqueeze(0)
-        x_adv = torch.logit(x.clamp(1e-4, 1 - 1e-4)).detach().to(device).requires_grad_(True)
-    else:
-        x_adv = (torch.randn(1, 3, image_h, image_w) * 0.1).to(device).requires_grad_(True)
-
-    optimizer = torch.optim.Adam([x_adv], lr=lr)
+    start_step = 0
     losses = []
+
+    if resume_from and Path(resume_from).exists():
+        ckpt = load_checkpoint(resume_from, device)
+        x_adv = ckpt["x_adv"].to(device).requires_grad_(True)
+        optimizer = torch.optim.Adam([x_adv], lr=lr)
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        # Move optimizer state to device
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+        start_step = ckpt["step"]
+        losses = ckpt["losses"]
+        logger.info(f"Resuming from step {start_step}")
+    else:
+        # Initialize in logit space (sigmoid maps to [0,1])
+        if init_image and init_image != "noise":
+            img = Image.open(init_image).convert("RGB").resize((image_w, image_h))
+            x = torch.tensor(np.array(img) / 255.0, dtype=torch.float32)
+            x = x.permute(2, 0, 1).unsqueeze(0)
+            x_adv = torch.logit(x.clamp(1e-4, 1 - 1e-4)).detach().to(device).requires_grad_(True)
+        else:
+            x_adv = (torch.randn(1, 3, image_h, image_w) * 0.1).to(device).requires_grad_(True)
+        optimizer = torch.optim.Adam([x_adv], lr=lr)
+
     target_feats = target_feats.detach()
 
-    logger.info(f"Optimizing: {epochs} steps, lr={lr}, size={image_h}x{image_w}")
+    if checkpoint_dir:
+        checkpoint_dir = Path(checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Optimizing: steps {start_step}→{epochs}, lr={lr}, size={image_h}x{image_w}")
     t0 = time.time()
 
-    for step in range(epochs):
+    for step in range(start_step, epochs):
         optimizer.zero_grad()
 
         # Sigmoid → [0, 1] image, then encode through differentiable pipeline
@@ -222,6 +266,16 @@ def optimize(
             elapsed = time.time() - t0
             logger.info(f"Step {step}/{epochs} | loss={loss.item():.6f} | time={elapsed:.1f}s")
 
+        # Save checkpoint
+        if checkpoint_dir and (step + 1) % checkpoint_every == 0:
+            save_checkpoint(checkpoint_dir / f"ckpt_step{step+1}.pt", x_adv, optimizer, step + 1, losses)
+            # Also save as "latest" for easy resume
+            save_checkpoint(checkpoint_dir / "ckpt_latest.pt", x_adv, optimizer, step + 1, losses)
+
+    # Final checkpoint
+    if checkpoint_dir:
+        save_checkpoint(checkpoint_dir / "ckpt_final.pt", x_adv, optimizer, epochs, losses)
+
     logger.info(f"Done. Final loss={losses[-1]:.6f}, time={time.time() - t0:.1f}s")
     return torch.sigmoid(x_adv).detach(), losses
 
@@ -236,6 +290,8 @@ def main():
     parser.add_argument("--image-size", type=int, default=448, help="Image size (must be divisible by 28)")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output-dir", type=str, default="outputs/qwen_attack")
+    parser.add_argument("--checkpoint-every", type=int, default=100, help="Save checkpoint every N steps")
+    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path (e.g. outputs/qwen_attack/ckpt_latest.pt)")
     args = parser.parse_args()
 
     # Ensure size is divisible by 28
@@ -263,6 +319,9 @@ def main():
         epochs=args.epochs, lr=args.lr,
         image_h=size, image_w=size, device=args.device,
         init_image=args.init_image,
+        checkpoint_dir=out_dir,
+        checkpoint_every=args.checkpoint_every,
+        resume_from=args.resume,
     )
 
     # Save results
