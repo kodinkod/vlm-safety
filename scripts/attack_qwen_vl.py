@@ -181,7 +181,7 @@ def encode_tensor(x: torch.Tensor, vision_encoder) -> torch.Tensor:
 
 
 def save_checkpoint(path: str | Path, x_adv: torch.Tensor, optimizer, step: int, losses: list[float]):
-    """Save optimization checkpoint."""
+    """Save optimization checkpoint + preview image."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
@@ -190,7 +190,11 @@ def save_checkpoint(path: str | Path, x_adv: torch.Tensor, optimizer, step: int,
         "step": step,
         "losses": losses,
     }, path)
-    logger.info(f"Checkpoint saved: {path} (step {step})")
+    # Save preview image next to checkpoint
+    img_path = path.with_suffix(".png")
+    adv_img = torch.sigmoid(x_adv).detach().cpu()[0].permute(1, 2, 0).clamp(0, 1).numpy()
+    Image.fromarray((adv_img * 255).astype(np.uint8)).save(img_path)
+    logger.info(f"Checkpoint saved: {path} + {img_path.name} (step {step})")
 
 
 def load_checkpoint(path: str | Path, device: str = "cuda") -> dict:
